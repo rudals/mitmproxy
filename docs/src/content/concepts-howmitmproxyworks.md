@@ -33,13 +33,10 @@ This is a proxy GET request - an extended form of the vanilla HTTP GET
 request that includes a schema and host specification, and it includes
 all the information mitmproxy needs to proceed.
 
-
 {{< figure src="/schematics/how-mitmproxy-works-explicit.png" title="Explicit" >}}
-
 
 1. The client connects to the proxy and makes a request.
 2. Mitmproxy connects to the upstream server and simply forwards the request on.
-
 
 ## Explicit HTTPS
 
@@ -195,7 +192,7 @@ this introduces the second component required for working transparent
 proxying: a host module that knows how to retrieve the original
 destination address from the router. In mitmproxy, this takes the form
 of a built-in set of
-[modules](https://github.com/mitmproxy/mitmproxy/tree/master/mitmproxy/platform)
+[modules](https://github.com/mitmproxy/mitmproxy/tree/main/mitmproxy/platform)
 that know how to talk to each platform's redirection mechanism. Once we
 have this information, the process is fairly straight-forward.
 

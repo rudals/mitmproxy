@@ -7,7 +7,7 @@ import typing
 
 from mitmproxy.proxy import commands, context, layer
 from mitmproxy.proxy import events
-from mitmproxy.proxy.context import ConnectionState
+from mitmproxy.connection import ConnectionState
 from mitmproxy.proxy.events import command_reply_subclasses
 from mitmproxy.proxy.layer import Layer
 
@@ -79,7 +79,7 @@ def _merge_sends(lst: typing.List[commands.Command], ignore_hooks: bool, ignore_
                 current_send.data += x.data
         else:
             ignore = (
-                    (ignore_hooks and isinstance(x, commands.Hook))
+                    (ignore_hooks and isinstance(x, commands.StartHook))
                     or
                     (ignore_logs and isinstance(x, commands.Log))
             )
@@ -191,7 +191,7 @@ class Playbook:
                 for name, value in vars(x).items():
                     if isinstance(value, _Placeholder):
                         setattr(x, name, value())
-                if isinstance(x, events.OpenConnectionReply) and not x.reply:
+                if isinstance(x, events.OpenConnectionCompleted) and not x.reply:
                     x.command.connection.state = ConnectionState.OPEN
                 elif isinstance(x, events.ConnectionClosed):
                     x.connection.state &= ~ConnectionState.CAN_READ
@@ -227,13 +227,13 @@ class Playbook:
                         )
                         if need_to_emulate_log:
                             self.expected.insert(pos, cmd)
-                    elif isinstance(cmd, commands.Hook) and not self.hooks:
+                    elif isinstance(cmd, commands.StartHook) and not self.hooks:
                         need_to_emulate_hook = (
                                 not self.hooks
                                 and (
                                         pos >= len(self.expected) or
                                         (not (
-                                                isinstance(self.expected[pos], commands.Hook)
+                                                isinstance(self.expected[pos], commands.StartHook)
                                                 and self.expected[pos].name == cmd.name
                                         ))
                                 )
@@ -243,7 +243,7 @@ class Playbook:
                             if cmd.blocking:
                                 # the current event may still have yielded more events, so we need to insert
                                 # the reply *after* those additional events.
-                                hook_replies.append(events.HookReply(cmd))
+                                hook_replies.append(events.HookCompleted(cmd))
                 self.expected = self.expected[:pos + 1] + hook_replies + self.expected[pos + 1:]
 
                 eq(self.expected[i:], self.actual[i:])  # compare now already to set placeholders
@@ -288,7 +288,7 @@ class reply(events.Event):
         self.to = to
         self.side_effect = side_effect
 
-    def playbook_eval(self, playbook: Playbook) -> events.CommandReply:
+    def playbook_eval(self, playbook: Playbook) -> events.CommandCompleted:
         if isinstance(self.to, int):
             expected = playbook.expected[:playbook.expected.index(self)]
             assert abs(self.to) < len(expected)
@@ -305,9 +305,9 @@ class reply(events.Event):
             raise AssertionError(f"Expected command {self.to} did not occur.")
 
         assert isinstance(self.to, commands.Command)
-        if isinstance(self.to, commands.Hook):
+        if isinstance(self.to, commands.StartHook):
             self.side_effect(*self.to.args())
-            reply_cls = events.HookReply
+            reply_cls = events.HookCompleted
         else:
             self.side_effect(self.to)
             reply_cls = command_reply_subclasses[type(self.to)]
@@ -318,7 +318,10 @@ class reply(events.Event):
         return inst
 
 
-class _Placeholder:
+T = typing.TypeVar("T")
+
+
+class _Placeholder(typing.Generic[T]):
     """
     Placeholder value in playbooks, so that objects (flows in particular) can be referenced before
     they are known. Example:
@@ -333,15 +336,15 @@ class _Placeholder:
     assert f().messages == 0
     """
 
-    def __init__(self, cls: typing.Type):
+    def __init__(self, cls: typing.Type[T]):
         self._obj = None
         self._cls = cls
 
-    def __call__(self):
+    def __call__(self) -> T:
         """Get the actual object"""
         return self._obj
 
-    def setdefault(self, value):
+    def setdefault(self, value: T) -> T:
         if self._obj is None:
             if self._cls is not typing.Any and not isinstance(value, self._cls):
                 raise TypeError(f"expected {self._cls.__name__}, got {type(value).__name__}.")
@@ -355,11 +358,8 @@ class _Placeholder:
         return f"Placeholder:{str(self._obj)}"
 
 
-T = typing.TypeVar("T")
-
-
 # noinspection PyPep8Naming
-def Placeholder(cls: typing.Type[T] = typing.Any) -> typing.Union[T, typing.Callable[[], T]]:
+def Placeholder(cls: typing.Type[T] = typing.Any) -> typing.Union[T, _Placeholder[T]]:
     return _Placeholder(cls)
 
 

@@ -4,11 +4,11 @@ from dataclasses import dataclass
 from typing import Iterator, Optional, Tuple
 
 from OpenSSL import SSL
-from mitmproxy import certs
+from mitmproxy import certs, connection
 from mitmproxy.net import tls as net_tls
 from mitmproxy.proxy import commands, events, layer, tunnel
 from mitmproxy.proxy import context
-from mitmproxy.proxy.commands import Hook
+from mitmproxy.proxy.commands import StartHook
 from mitmproxy.utils import human
 
 
@@ -98,31 +98,45 @@ HTTP_ALPNS = (b"h2",) + HTTP1_ALPNS
 # We need these classes as hooks can only have one argument at the moment.
 
 @dataclass
-class TlsStartData:
-    conn: context.Connection
-    context: context.Context
-    ssl_conn: Optional[SSL.Connection] = None
-
-
-@dataclass
 class ClientHelloData:
     context: context.Context
     establish_server_tls_first: bool = False
 
 
-class TlsStartHook(Hook):
-    data: TlsStartData
+@dataclass
+class TlsClienthelloHook(StartHook):
+    """
+    Mitmproxy has received a TLS ClientHello message.
 
-
-class TlsClienthelloHook(Hook):
+    This hook decides whether a server connection is needed
+    to negotiate TLS with the client (data.establish_server_tls_first)
+    """
     data: ClientHelloData
+
+
+@dataclass
+class TlsStartData:
+    conn: connection.Connection
+    context: context.Context
+    ssl_conn: Optional[SSL.Connection] = None
+
+
+@dataclass
+class TlsStartHook(StartHook):
+    """
+    TLS Negotation is about to start.
+
+    An addon is expected to initialize data.ssl_conn.
+    (by default, this is done by mitmproxy.addons.TlsConfig)
+    """
+    data: TlsStartData
 
 
 class _TLSLayer(tunnel.TunnelLayer):
     tls: SSL.Connection = None
     """The OpenSSL connection object"""
 
-    def __init__(self, context: context.Context, conn: context.Connection):
+    def __init__(self, context: context.Context, conn: connection.Connection):
         super().__init__(
             context,
             tunnel_connection=conn,
@@ -179,8 +193,9 @@ class _TLSLayer(tunnel.TunnelLayer):
             elif last_err == ('SSL routines', 'ssl3_get_record', 'wrong version number') and data[:4].isascii():
                 err = f"The remote server does not speak TLS."
             else:  # pragma: no cover
-                # TODO: Add test case one we find one.
+                # TODO: Add test case once we find one.
                 err = f"OpenSSL {e!r}"
+            self.conn.error = err
             return False, err
         else:
             # Here we set all attributes that are only known *after* the handshake.
@@ -226,7 +241,7 @@ class _TLSLayer(tunnel.TunnelLayer):
                 events.DataReceived(self.conn, bytes(plaintext))
             )
         if close:
-            self.conn.state &= ~context.ConnectionState.CAN_READ
+            self.conn.state &= ~connection.ConnectionState.CAN_READ
             if self.debug:
                 yield commands.Log(f"{self.debug}[tls] close_notify {self.conn}", level="debug")
             yield from self.event_to_child(
@@ -240,7 +255,11 @@ class _TLSLayer(tunnel.TunnelLayer):
             yield from super().receive_close()
 
     def send_data(self, data: bytes) -> layer.CommandGenerator[None]:
-        self.tls.sendall(data)
+        try:
+            self.tls.sendall(data)
+        except SSL.ZeroReturnError:
+            # The other peer may still be trying to send data over, which we discard here.
+            pass
         yield from self.tls_interact()
 
     def send_close(self, half_close: bool) -> layer.CommandGenerator[None]:
@@ -252,14 +271,39 @@ class ServerTLSLayer(_TLSLayer):
     """
     This layer establishes TLS for a single server connection.
     """
-    command_to_reply_to: Optional[commands.OpenConnection] = None
+    wait_for_clienthello: bool = False
 
-    def __init__(self, context: context.Context, conn: Optional[context.Server] = None):
+    def __init__(self, context: context.Context, conn: Optional[connection.Server] = None):
         super().__init__(context, conn or context.server)
 
     def start_handshake(self) -> layer.CommandGenerator[None]:
-        yield from self.start_tls()
-        yield from self.receive_handshake_data(b"")
+        wait_for_clienthello = (
+            # if command_to_reply_to is set, we've been instructed to open the connection from the child layer.
+            # in that case any potential ClientHello is already parsed (by the ClientTLS child layer).
+            not self.command_to_reply_to
+            # if command_to_reply_to is not set, the connection was already open when this layer received its Start
+            # event (eager connection strategy). We now want to establish TLS right away, _unless_ we already know
+            # that there's TLS on the client side as well (we check if our immediate child layer is set to be ClientTLS)
+            # In this case want to wait for ClientHello to be parsed, so that we can incorporate SNI/ALPN from there.
+            and isinstance(self.child_layer, ClientTLSLayer)
+        )
+        if wait_for_clienthello:
+            self.wait_for_clienthello = True
+            self.tunnel_state = tunnel.TunnelState.CLOSED
+        else:
+            yield from self.start_tls()
+            yield from self.receive_handshake_data(b"")
+
+    def event_to_child(self, event: events.Event) -> layer.CommandGenerator[None]:
+        if self.wait_for_clienthello:
+            for command in super().event_to_child(event):
+                if isinstance(command, commands.OpenConnection) and command.connection == self.conn:
+                    self.wait_for_clienthello = False
+                    # swallow OpenConnection here by not re-yielding it.
+                else:
+                    yield command
+        else:
+            yield from super().event_to_child(event)
 
     def on_handshake_error(self, err: str) -> layer.CommandGenerator[None]:
         yield commands.Log(f"Server TLS handshake failed. {err}", level="warn")
@@ -359,4 +403,4 @@ class MockTLSLayer(_TLSLayer):
     """
 
     def __init__(self, ctx: context.Context):
-        super().__init__(ctx, context.Server(None))
+        super().__init__(ctx, connection.Server(None))

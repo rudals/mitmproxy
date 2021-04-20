@@ -4,8 +4,9 @@ import typing
 import pytest
 
 from OpenSSL import SSL
+from mitmproxy import connection
+from mitmproxy.connection import ConnectionState, Server
 from mitmproxy.proxy import commands, context, events, layer
-from mitmproxy.proxy.context import ConnectionState
 from mitmproxy.proxy.layers import tls
 from mitmproxy.utils import data
 from test.mitmproxy.proxy import tutils
@@ -121,7 +122,7 @@ class SSLTest:
         return self.obj.do_handshake()
 
 
-def _test_echo(playbook: tutils.Playbook, tssl: SSLTest, conn: context.Connection) -> None:
+def _test_echo(playbook: tutils.Playbook, tssl: SSLTest, conn: connection.Connection) -> None:
     tssl.obj.write(b"Hello World")
     data = tutils.Placeholder(bytes)
     assert (
@@ -145,7 +146,7 @@ class TlsEchoLayer(tutils.EchoLayer):
             yield from super()._handle_event(event)
 
 
-def interact(playbook: tutils.Playbook, conn: context.Connection, tssl: SSLTest):
+def interact(playbook: tutils.Playbook, conn: connection.Connection, tssl: SSLTest):
     data = tutils.Placeholder(bytes)
     assert (
             playbook
@@ -383,18 +384,21 @@ class TestClientTLS:
 
         # Echo
         _test_echo(playbook, tssl_client, tctx.client)
-        other_server = context.Server(None)
+        other_server = Server(None)
         assert (
                 playbook
                 >> events.DataReceived(other_server, b"Plaintext")
                 << commands.SendData(other_server, b"plaintext")
         )
 
-    def test_server_required(self, tctx):
+    @pytest.mark.parametrize("eager", ["eager", ""])
+    def test_server_required(self, tctx, eager):
         """
         Test the scenario where a server connection is required (for example, because of an unknown ALPN)
         to establish TLS with the client.
         """
+        if eager:
+            tctx.server.state = ConnectionState.OPEN
         tssl_server = SSLTest(server_side=True, alpn=["quux"])
         playbook, client_layer, tssl_client = make_client_tls_layer(tctx, alpn=["quux"])
 
@@ -404,16 +408,23 @@ class TestClientTLS:
         def require_server_conn(client_hello: tls.ClientHelloData) -> None:
             client_hello.establish_server_tls_first = True
 
-        assert (
+        (
                 playbook
                 >> events.DataReceived(tctx.client, tssl_client.bio_read())
                 << tls.TlsClienthelloHook(tutils.Placeholder())
                 >> tutils.reply(side_effect=require_server_conn)
+        )
+        if not eager:
+            (
+                playbook
                 << commands.OpenConnection(tctx.server)
                 >> tutils.reply(None)
-                << tls.TlsStartHook(tutils.Placeholder())
-                >> reply_tls_start(alpn=b"quux")
-                << commands.SendData(tctx.server, data)
+            )
+        assert (
+            playbook
+            << tls.TlsStartHook(tutils.Placeholder())
+            >> reply_tls_start(alpn=b"quux")
+            << commands.SendData(tctx.server, data)
         )
 
         # Establish TLS with the server...
@@ -508,6 +519,6 @@ class TestClientTLS:
                 << commands.SendData(tctx.client, tutils.Placeholder())
                 >> events.ConnectionClosed(tctx.client)
                 << commands.Log("Client TLS handshake failed. The client may not trust the proxy's certificate "
-                                "for wrong.host.mitmproxy.org (connection closed without notice)", "warn")
+                                "for wrong.host.mitmproxy.org (connection closed)", "warn")
                 << commands.CloseConnection(tctx.client)
         )

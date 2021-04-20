@@ -1,7 +1,7 @@
 import re
 from typing import Type, Sequence, Union, Tuple, Any, Iterable, Optional, List
 
-from mitmproxy import ctx, exceptions
+from mitmproxy import ctx, exceptions, connection
 from mitmproxy.net.tls import is_tls_record_magic
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import context, layer, layers
@@ -43,7 +43,7 @@ class NextLayer:
                 re.compile(x, re.IGNORECASE) for x in ctx.options.allow_hosts
             ]
 
-    def ignore_connection(self, server_address: Optional[context.Address], data_client: bytes) -> Optional[bool]:
+    def ignore_connection(self, server_address: Optional[connection.Address], data_client: bytes) -> Optional[bool]:
         """
         Returns:
             True, if the connection should be ignored.
@@ -105,8 +105,6 @@ class NextLayer:
         def s(*layers):
             return stack_match(context, layers)
 
-        top_layer = context.layers[-1]
-
         # 1. check for --ignore/--allow
         ignore = self.ignore_connection(context.server.address, data_client)
         if ignore is True:
@@ -116,13 +114,17 @@ class NextLayer:
 
         # 2. Check for TLS
         if client_tls:
-            # client tls requires a server tls layer as parent layer
-            # reverse proxy mode manages this itself.
-            # a secure web proxy doesn't have a server part.
-            if isinstance(top_layer, layers.ServerTLSLayer) or s(modes.ReverseProxy) or s(modes.HttpProxy):
+            # client tls usually requires a server tls layer as parent layer, except:
+            #  - reverse proxy mode manages this itself.
+            #  - a secure web proxy doesn't have a server part.
+            if s(modes.ReverseProxy) or s(modes.HttpProxy):
                 return layers.ClientTLSLayer(context)
             else:
-                return layers.ServerTLSLayer(context)
+                # We already assign the next layer here os that ServerTLSLayer
+                # knows that it can safely wait for a ClientHello.
+                ret = layers.ServerTLSLayer(context)
+                ret.child_layer = layers.ClientTLSLayer(context)
+                return ret
 
         # 3. Setup the HTTP layer for a regular HTTP proxy or an upstream proxy.
         if any([
@@ -168,7 +170,7 @@ class NextLayer:
             return layers.modes.ReverseProxy(context)
 
         elif ctx.options.mode == "socks5":
-            raise NotImplementedError("Mode not implemented.")
+            return layers.modes.Socks5Proxy(context)
 
         else:  # pragma: no cover
             raise AssertionError("Unknown mode.")

@@ -24,8 +24,8 @@ def flowdetails(state, flow: mitmproxy.flow.Flow):
 
     sc = flow.server_conn
     cc = flow.client_conn
-    req: typing.Optional[http.HTTPRequest]
-    resp: typing.Optional[http.HTTPResponse]
+    req: typing.Optional[http.Request]
+    resp: typing.Optional[http.Response]
     if isinstance(flow, http.HTTPFlow):
         req = flow.request
         resp = flow.response
@@ -55,8 +55,8 @@ def flowdetails(state, flow: mitmproxy.flow.Flow):
             common.format_keyvals(parts, indent=4)
         )
 
-        c = sc.certificate_list[0]
-        if c:
+        if sc.certificate_list:
+            c = sc.certificate_list[0]
             text.append(urwid.Text([("head", "Server Certificate:")]))
             parts = [
                 ("Type", "%s, %s bits" % c.keyinfo),
@@ -69,7 +69,7 @@ def flowdetails(state, flow: mitmproxy.flow.Flow):
             ]
 
             if c.altnames:
-                parts.append(("Alt names", ", ".join(strutils.bytes_to_escaped_str(x) for x in c.altnames)))
+                parts.append(("Alt names", ", ".join(c.altnames)))
             text.extend(
                 common.format_keyvals(parts, indent=4)
             )

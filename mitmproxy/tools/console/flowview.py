@@ -3,19 +3,18 @@ import sys
 from functools import lru_cache
 from typing import Optional, Union  # noqa
 
-import urwid
-
 import mitmproxy.flow
+import mitmproxy.tools.console.master  # noqa
+import urwid
 from mitmproxy import contentviews
 from mitmproxy import ctx
 from mitmproxy import http
 from mitmproxy import tcp
 from mitmproxy.tools.console import common
-from mitmproxy.tools.console import layoutwidget
 from mitmproxy.tools.console import flowdetailview
+from mitmproxy.tools.console import layoutwidget
 from mitmproxy.tools.console import searchable
 from mitmproxy.tools.console import tabs
-import mitmproxy.tools.console.master  # noqa
 from mitmproxy.utils import strutils
 
 
@@ -26,8 +25,8 @@ class SearchError(Exception):
 class FlowViewHeader(urwid.WidgetWrap):
 
     def __init__(
-            self,
-            master: "mitmproxy.tools.console.master.ConsoleMaster",
+        self,
+        master: "mitmproxy.tools.console.master.ConsoleMaster",
     ) -> None:
         self.master = master
         self.focus_changed()
@@ -60,14 +59,23 @@ class FlowDetails(tabs.Tabs):
         return self.master.view.focus.flow
 
     def focus_changed(self):
-        if self.flow:
-            if isinstance(self.flow, http.HTTPFlow):
-                self.tabs = [
-                    (self.tab_http_request, self.view_request),
-                    (self.tab_http_response, self.view_response),
-                    (self.tab_details, self.view_details),
-                ]
-            elif isinstance(self.flow, tcp.TCPFlow):
+        f = self.flow
+        if f:
+            if isinstance(f, http.HTTPFlow):
+                if f.websocket:
+                    self.tabs = [
+                        (self.tab_http_request, self.view_request),
+                        (self.tab_http_response, self.view_response),
+                        (self.tab_websocket_messages, self.view_websocket_messages),
+                        (self.tab_details, self.view_details),
+                    ]
+                else:
+                    self.tabs = [
+                        (self.tab_http_request, self.view_request),
+                        (self.tab_http_response, self.view_response),
+                        (self.tab_details, self.view_details),
+                    ]
+            elif isinstance(f, tcp.TCPFlow):
                 self.tabs = [
                     (self.tab_tcp_stream, self.view_tcp_stream),
                     (self.tab_details, self.view_details),
@@ -94,6 +102,9 @@ class FlowDetails(tabs.Tabs):
 
     def tab_tcp_stream(self):
         return "TCP Stream"
+
+    def tab_websocket_messages(self):
+        return "WebSocket Messages"
 
     def tab_details(self):
         return "Detail"
@@ -128,6 +139,46 @@ class FlowDetails(tabs.Tabs):
         contentview_status_bar = urwid.AttrWrap(urwid.Columns(cols), "heading")
         return contentview_status_bar
 
+    FROM_CLIENT_MARKER = ("from_client", f"{common.SYMBOL_FROM_CLIENT} ")
+    TO_CLIENT_MARKER = ("to_client", f"{common.SYMBOL_TO_CLIENT} ")
+
+    def view_websocket_messages(self):
+        flow = self.flow
+        assert isinstance(flow, http.HTTPFlow)
+        assert flow.websocket is not None
+
+        if not flow.websocket.messages:
+            return searchable.Searchable([urwid.Text(("highlight", "No messages."))])
+
+        viewmode = self.master.commands.call("console.flowview.mode")
+
+        widget_lines = []
+        for m in flow.websocket.messages:
+            _, lines, _ = contentviews.get_message_content_view(viewmode, m, flow)
+
+            for line in lines:
+                if m.from_client:
+                    line.insert(0, self.FROM_CLIENT_MARKER)
+                else:
+                    line.insert(0, self.TO_CLIENT_MARKER)
+
+                widget_lines.append(urwid.Text(line))
+
+        if flow.websocket.closed_by_client is not None:
+            widget_lines.append(urwid.Text([
+                (self.FROM_CLIENT_MARKER if flow.websocket.closed_by_client else self.TO_CLIENT_MARKER),
+                ("alert" if flow.websocket.close_code in (1000, 1001, 1005) else "error",
+                 f"Connection closed: {flow.websocket.close_code} {flow.websocket.close_reason}")
+            ]))
+
+        if flow.intercepted:
+            markup = widget_lines[-1].get_text()[0]
+            widget_lines[-1].set_text(("intercept", markup))
+
+        widget_lines.insert(0, self._contentview_status_bar(viewmode.capitalize(), viewmode))
+
+        return searchable.Searchable(widget_lines)
+
     def view_tcp_stream(self) -> urwid.Widget:
         flow = self.flow
         assert isinstance(flow, tcp.TCPFlow)
@@ -152,13 +203,13 @@ class FlowDetails(tabs.Tabs):
 
         from_client = flow.messages[0].from_client
         for m in messages:
-            _, lines, _ = contentviews.get_tcp_content_view(viewmode, m)
+            _, lines, _ = contentviews.get_tcp_content_view(viewmode, m, flow)
 
             for line in lines:
                 if from_client:
-                    line.insert(0, ("from_client", f"{common.SYMBOL_FROM_CLIENT} "))
+                    line.insert(0, self.FROM_CLIENT_MARKER)
                 else:
-                    line.insert(0, ("to_client", f"{common.SYMBOL_TO_CLIENT} "))
+                    line.insert(0, self.TO_CLIENT_MARKER)
 
                 widget_lines.append(urwid.Text(line))
 
@@ -205,7 +256,7 @@ class FlowDetails(tabs.Tabs):
         if error:
             self.master.log.debug(error)
         # Give hint that you have to tab for the response.
-        if description == "No content" and isinstance(message, http.HTTPRequest):
+        if description == "No content" and isinstance(message, http.Request):
             description = "No request content"
 
         # If the users has a wide terminal, he gets fewer lines; this should not be an issue.

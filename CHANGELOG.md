@@ -26,21 +26,38 @@ Mitmproxy has a completely new proxy core, fixing many longstanding issues:
 
 We wanted to bring these improvements out, so we have a few temporary regressions:
 
-* HTTP trailers were added in mitmproxy 5.2, but have not made it into the new core yet.
 * Support for HTTP/2 Push Promises has been dropped.
-* Message Injection for WebSocket and TCP connections is not implemented yet.
-* SOCKS/5 Proxy Mode is not implemented yet.
+* body_size_limit is currently unsupported.
+* upstream_auth is currently unsupported.
 
 If you depend on these features, please raise your voice in
 [#4348](https://github.com/mitmproxy/mitmproxy/issues/4348)!
 
-
 ### Full Changelog
 
 * New Proxy Core based on sans-io pattern (@mhils)
+* mitmproxy's command line interface now supports Windows (@mhils)
+* The `clientconnect`, `clientdisconnect`, `serverconnect`, `serverdisconnect`, and `log`
+  events have been replaced with new events, see addon documentation for details (@mhils)
+* Contentviews now implement `render_priority` instead of `should_render`, allowing more specialization (@mhils)
+* Addition of block_list option to block requests with a set status code (@ericbeland)
+* Make mitmweb columns configurable and customizable (@gorogoroumaru)
+* Automatic JSON view mode when `+json` suffix in content type (@kam800)
 * Use pyca/cryptography to generate certificates, not pyOpenSSL (@mhils)
 * Remove the legacy protocol stack (@Kriechi)
 * Remove all deprecated pathod and pathoc tools and modules (@Kriechi)
+* In reverse proxy mode, mitmproxy now does not assume TLS if no scheme
+  is given but a custom port is provided (@mhils)
+* Remove the following options: `http2_priority`, `relax_http_form_validation`, `upstream_bind_address`,
+  `spoof_source_address`, and `stream_websockets`. If you depended on one of them please let us know.
+  mitmproxy never phones home, which means we don't know how prominently these options were used. (@mhils)
+* Fix IDNA host 'Bad HTTP request line' error (@grahamrobbins)
+* Pressing `?` now exits console help view (@abitrolly)
+* `--modify-headers` now works correctly when modifying a header that is also part of the filter expression (@Prinzhorn)
+* Fix SNI-related reproducibility issues when exporting to curl/httpie commands. (@dkasak)
+* Add option `export_preserve_original_ip` to force exported command to connect to IP from original request. Only supports curl at the moment. (@dkasak)
+* Major proxy protocol testing (@r00t-)
+* Switch Docker image release to be based on Debian (@PeterDaveHello)
 * --- TODO: add new PRs above this line ---
 * ... and various other fixes, documentation improvements, dependency version bumps, etc.
 
@@ -76,11 +93,11 @@ If you depend on these features, please raise your voice in
 
 * Support for Python 3.9 (@mhils)
 * Add MsgPack content viewer (@tasn)
-* Use `@charset` to decode CSS files if available (@prinzhorn)
+* Use `@charset` to decode CSS files if available (@Prinzhorn)
 * Fix links to anticache docs in mitmweb and use HTTPS for links to documentation (@rugk)
-* Updated typing for WebsocketMessage.content (@prinzhorn)
+* Updated typing for WebsocketMessage.content (@Prinzhorn)
 * Add option `console_strip_trailing_newlines`, and no longer strip trailing newlines by default (@capt8bit)
-* Prevent transparent mode from connecting to itself in the basic cases (@prinzhorn)
+* Prevent transparent mode from connecting to itself in the basic cases (@Prinzhorn)
 * Display HTTP trailers in mitmweb (@sanlengjingvv)
 * Revamp onboarding app (@mhils)
 * Add ASGI support for embedded apps (@mhils)
@@ -170,7 +187,7 @@ If you depend on these features, please raise your voice in
 
 ### Full Changelog
 
-* Moved to Github CI for Continuous Integration, dropping support for old Linux and macOS releases. (#3728)
+* Moved to GitHub CI for Continuous Integration, dropping support for old Linux and macOS releases. (#3728)
 * Vastly improved command parsing, in particular for setting flow filters (@typoon)
 * Added a new flow export for raw responses (@mckeimic)
 * URLs are now edited in an external editor (@Jessonsotoventura)
@@ -468,7 +485,6 @@ If you depend on these features, please raise your voice in
 * Fix XSS vulnerability in HTTP errors (Will Coster)
 * Numerous bugfixes and minor improvements
 
-
 ## 15 February 2016: mitmproxy 0.16
 
 * Completely revised HTTP2 implementation based on hyper-h2 (Thomas Kriechbaumer)
@@ -626,7 +642,6 @@ If you depend on these features, please raise your voice in
 * Big improvements to fuzzing, including random spec selection and memoization to avoid repeating randomly generated patterns
 * Reflected patterns, allowing you to embed a pathod server response specification in a pathoc request, resolving both on client side. This makes fuzzing proxies and other intermediate systems much better.
 
-
 ## 28 January 2014: mitmproxy 0.10
 
 * Support for multiple scripts and multiple script arguments
@@ -707,7 +722,6 @@ If you depend on these features, please raise your voice in
   targets.
 * Pathoc client certificate support.
 * API improvements, bugfixes.
-
 
 ## 16 November 2012: pathod 0.3
 

@@ -4,14 +4,13 @@ import sys
 import threading
 import traceback
 
-from mitmproxy import addonmanager
+from mitmproxy import addonmanager, hooks
 from mitmproxy import command
 from mitmproxy import controller
 from mitmproxy import eventsequence
 from mitmproxy import http
 from mitmproxy import log
 from mitmproxy import options
-from mitmproxy import websocket
 from mitmproxy.net import server_spec
 from . import ctx as mitmproxy_ctx
 
@@ -34,7 +33,6 @@ class Master:
         self.commands = command.CommandManager(self)
         self.addons = addonmanager.AddonManager(self)
         self._server = None
-        self.waiting_flows = []
         self.log = log.Log(self)
 
         mitmproxy_ctx.master = self
@@ -45,7 +43,7 @@ class Master:
         self.should_exit.clear()
 
     async def running(self):
-        self.addons.trigger("running")
+        self.addons.trigger(hooks.RunningHook())
 
     def run_loop(self, loop):
         self.start()
@@ -69,11 +67,11 @@ class Master:
             print(exc, file=sys.stderr)
             print("mitmproxy has crashed!", file=sys.stderr)
             print("Please lodge a bug report at:", file=sys.stderr)
-            print("\thttps://github.com/mitmproxy/mitmproxy", file=sys.stderr)
+            print("\thttps://github.com/mitmproxy/mitmproxy/issues", file=sys.stderr)
 
-        self.addons.trigger("done")
+        self.addons.trigger(hooks.DoneHook())
 
-    def run(self, func=None):
+    def run(self):
         loop = asyncio.get_event_loop()
         self.run_loop(loop.run_forever)
 
@@ -111,25 +109,12 @@ class Master:
 
     async def load_flow(self, f):
         """
-        Loads a flow and links websocket & handshake flows
+        Loads a flow
         """
 
         if isinstance(f, http.HTTPFlow):
             self._change_reverse_host(f)
-            if 'websocket' in f.metadata:
-                self.waiting_flows.append(f)
-
-        if isinstance(f, websocket.WebSocketFlow):
-            hfs = [hf for hf in self.waiting_flows if hf.id == f.metadata['websocket_handshake']]
-            if hfs:
-                hf = hfs[0]
-                f.handshake_flow = hf
-                self.waiting_flows.remove(hf)
-                self._change_reverse_host(f.handshake_flow)
-            else:
-                # this will fail - but at least it will load the remaining flows
-                f.handshake_flow = http.HTTPFlow(None, None)
 
         f.reply = controller.DummyReply()
-        for e, o in eventsequence.iterate(f):
-            await self.addons.handle_lifecycle(e, o)
+        for e in eventsequence.iterate(f):
+            await self.addons.handle_lifecycle(e)

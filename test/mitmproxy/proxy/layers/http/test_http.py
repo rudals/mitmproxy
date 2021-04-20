@@ -1,14 +1,17 @@
 import pytest
 
 from mitmproxy.flow import Error
-from mitmproxy.http import HTTPFlow, HTTPResponse
+from mitmproxy.http import HTTPFlow, Response
 from mitmproxy.net.server_spec import ServerSpec
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import layer
-from mitmproxy.proxy.commands import CloseConnection, OpenConnection, SendData
-from mitmproxy.proxy.context import ConnectionState, Server
+from mitmproxy.proxy.commands import CloseConnection, OpenConnection, SendData, Log
+from mitmproxy.connection import ConnectionState, Server
 from mitmproxy.proxy.events import ConnectionClosed, DataReceived
 from mitmproxy.proxy.layers import TCPLayer, http, tls
+from mitmproxy.proxy.layers.tcp import TcpMessageInjected, TcpStartHook
+from mitmproxy.proxy.layers.websocket import WebsocketStartHook
+from mitmproxy.tcp import TCPFlow, TCPMessage
 from test.mitmproxy.proxy.tutils import Placeholder, Playbook, reply, reply_next_layer
 
 
@@ -201,7 +204,7 @@ def test_http_reply_from_proxy(tctx):
     """Test a response served by mitmproxy itself."""
 
     def reply_from_proxy(flow: HTTPFlow):
-        flow.response = HTTPResponse.make(418)
+        flow.response = Response.make(418)
 
     assert (
             Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
@@ -313,8 +316,6 @@ def test_request_streaming(tctx, response):
                                          b"abc")
             << http.HttpRequestHeadersHook(flow)
             >> reply(side_effect=enable_streaming)
-            << http.HttpRequestHook(flow)
-            >> reply()
             << OpenConnection(server)
             >> reply(None)
             << SendData(server, b"POST / HTTP/1.1\r\n"
@@ -327,6 +328,8 @@ def test_request_streaming(tctx, response):
                 playbook
                 >> DataReceived(tctx.client, b"def")
                 << SendData(server, b"DEF")
+                << http.HttpRequestHook(flow)
+                >> reply()
                 >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 << http.HttpResponseHeadersHook(flow)
                 >> reply()
@@ -347,7 +350,9 @@ def test_request_streaming(tctx, response):
                 >> reply()
                 << SendData(tctx.client, b"HTTP/1.1 413 Request Entity Too Large\r\nContent-Length: 0\r\n\r\n")
                 >> DataReceived(tctx.client, b"def")
-                << SendData(server, b"DEF")  # Important: no request hook here!
+                << SendData(server, b"DEF")
+                << http.HttpRequestHook(flow)
+                >> reply()
         )
     elif response == "early close":
         assert (
@@ -540,6 +545,8 @@ def test_upstream_proxy(tctx, redirect, scheme):
 def test_http_proxy_tcp(tctx, mode, close_first):
     """Test TCP over HTTP CONNECT."""
     server = Placeholder(Server)
+    f = Placeholder(TCPFlow)
+    tctx.options.connection_strategy = "lazy"
 
     if mode == "upstream":
         tctx.options.mode = "upstream:http://proxy:8080"
@@ -555,7 +562,9 @@ def test_http_proxy_tcp(tctx, mode, close_first):
             << SendData(tctx.client, b"HTTP/1.1 200 Connection established\r\n\r\n")
             >> DataReceived(tctx.client, b"this is not http")
             << layer.NextLayerHook(Placeholder())
-            >> reply_next_layer(lambda ctx: TCPLayer(ctx, ignore=True))
+            >> reply_next_layer(lambda ctx: TCPLayer(ctx, ignore=False))
+            << TcpStartHook(f)
+            >> reply()
             << OpenConnection(server)
     )
 
@@ -575,6 +584,12 @@ def test_http_proxy_tcp(tctx, mode, close_first):
         assert server().address == ("example", 443)
     else:
         assert server().address == ("proxy", 8080)
+
+    assert (
+        playbook
+        >> TcpMessageInjected(f, TCPMessage(False, b"fake news from your friendly man-in-the-middle"))
+        << SendData(tctx.client, b"fake news from your friendly man-in-the-middle")
+    )
 
     if close_first == "client":
         a, b = tctx.client, server
@@ -702,8 +717,6 @@ def test_http_client_aborts(tctx, stream):
         assert (
                 playbook
                 >> reply(side_effect=enable_streaming)
-                << http.HttpRequestHook(flow)
-                >> reply()
                 << OpenConnection(server)
                 >> reply(None)
                 << SendData(server, b"POST / HTTP/1.1\r\n"
@@ -801,6 +814,7 @@ def test_http_server_aborts(tctx, stream):
                                   "response", "error"])
 def test_kill_flow(tctx, when):
     """Test that we properly kill flows if instructed to do so"""
+    tctx.options.connection_strategy = "lazy"
     server = Placeholder(Server)
     connect_flow = Placeholder(HTTPFlow)
     flow = Placeholder(HTTPFlow)
@@ -839,7 +853,7 @@ def test_kill_flow(tctx, when):
         return assert_kill()
     if when == "script-response-responseheaders":
         assert (playbook
-                >> reply(side_effect=lambda f: setattr(f, "response", HTTPResponse.make()))
+                >> reply(side_effect=lambda f: setattr(f, "response", Response.make()))
                 << http.HttpResponseHeadersHook(flow))
         return assert_kill()
     assert (playbook
@@ -911,3 +925,95 @@ def test_connection_close_header(tctx, client_close, server_close):
                         b"\r\n")
             << CloseConnection(tctx.client)
     )
+
+
+@pytest.mark.parametrize("proto", ["websocket", "tcp", "none"])
+def test_upgrade(tctx, proto):
+    """Test a HTTP -> WebSocket upgrade with different protocols enabled"""
+    if proto != "websocket":
+        tctx.options.websocket = False
+    if proto != "tcp":
+        tctx.options.rawtcp = False
+
+    tctx.server.address = ("example.com", 80)
+    tctx.server.state = ConnectionState.OPEN
+    http_flow = Placeholder(HTTPFlow)
+    playbook = Playbook(http.HttpLayer(tctx, HTTPMode.transparent))
+    (
+            playbook
+            >> DataReceived(tctx.client,
+                            b"GET / HTTP/1.1\r\n"
+                            b"Connection: upgrade\r\n"
+                            b"Upgrade: websocket\r\n"
+                            b"Sec-WebSocket-Version: 13\r\n"
+                            b"\r\n")
+            << http.HttpRequestHeadersHook(http_flow)
+            >> reply()
+            << http.HttpRequestHook(http_flow)
+            >> reply()
+            << SendData(tctx.server, b"GET / HTTP/1.1\r\n"
+                                     b"Connection: upgrade\r\n"
+                                     b"Upgrade: websocket\r\n"
+                                     b"Sec-WebSocket-Version: 13\r\n"
+                                     b"\r\n")
+            >> DataReceived(tctx.server, b"HTTP/1.1 101 Switching Protocols\r\n"
+                                         b"Upgrade: websocket\r\n"
+                                         b"Connection: Upgrade\r\n"
+                                         b"\r\n")
+            << http.HttpResponseHeadersHook(http_flow)
+            >> reply()
+            << http.HttpResponseHook(http_flow)
+            >> reply()
+            << SendData(tctx.client, b"HTTP/1.1 101 Switching Protocols\r\n"
+                                     b"Upgrade: websocket\r\n"
+                                     b"Connection: Upgrade\r\n"
+                                     b"\r\n")
+    )
+    if proto == "websocket":
+        assert playbook << WebsocketStartHook(http_flow)
+    elif proto == "tcp":
+        assert playbook << TcpStartHook(Placeholder(TCPFlow))
+    else:
+        assert (
+            playbook
+            << Log("Sent HTTP 101 response, but no protocol is enabled to upgrade to.", "warn")
+            << CloseConnection(tctx.client)
+        )
+
+
+def test_dont_reuse_closed(tctx):
+    """Test that a closed connection is not reused."""
+    server = Placeholder(Server)
+    server2 = Placeholder(Server)
+    assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.regular), hooks=False)
+            >> DataReceived(tctx.client, b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            << OpenConnection(server)
+            >> reply(None)
+            << SendData(server, b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            >> DataReceived(server, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            << SendData(tctx.client, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            >> ConnectionClosed(server)
+            << CloseConnection(server)
+            >> DataReceived(tctx.client, b"GET http://example.com/two HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            << OpenConnection(server2)
+            >> reply(None)
+            << SendData(server2, b"GET /two HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            >> DataReceived(server2, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            << SendData(tctx.client, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+    )
+
+
+def test_reuse_error(tctx):
+    """Test that an errored connection is reused."""
+    tctx.server.address = ("example.com", 443)
+    tctx.server.error = "tls verify failed"
+    error_html = Placeholder(bytes)
+    assert (
+            Playbook(http.HttpLayer(tctx, HTTPMode.transparent), hooks=False)
+            >> DataReceived(tctx.client, b"GET / HTTP/1.1\r\n\r\n")
+            << SendData(tctx.client, error_html)
+            << CloseConnection(tctx.client)
+    )
+    assert b"502 Bad Gateway" in error_html()
+    assert b"tls verify failed" in error_html()

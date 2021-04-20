@@ -6,15 +6,16 @@ import hyperframe.frame
 import pytest
 from h2.errors import ErrorCodes
 
+from mitmproxy.connection import ConnectionState, Server
 from mitmproxy.flow import Error
-from mitmproxy.http import HTTPFlow
-from mitmproxy.net.http import Headers, Request, status_codes
-from mitmproxy.proxy.layers.http import HTTPMode
+from mitmproxy.http import HTTPFlow, Headers, Request
+from mitmproxy.net.http import status_codes
 from mitmproxy.proxy.commands import CloseConnection, OpenConnection, SendData
-from mitmproxy.proxy.context import Context, Server
+from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.events import ConnectionClosed, DataReceived
 from mitmproxy.proxy.layers import http
-from mitmproxy.proxy.layers.http._http2 import split_pseudo_headers, Http2Client
+from mitmproxy.proxy.layers.http import HTTPMode
+from mitmproxy.proxy.layers.http._http2 import Http2Client, split_pseudo_headers
 from test.mitmproxy.proxy.layers.http.hyper_h2_test_helpers import FrameFactory
 from test.mitmproxy.proxy.tutils import Placeholder, Playbook, reply
 
@@ -28,6 +29,26 @@ example_request_headers = (
 example_response_headers = (
     (b':status', b'200'),
 )
+
+example_request_trailers = (
+    (b'req-trailer-a', b'a'),
+    (b'req-trailer-b', b'b')
+)
+
+example_response_trailers = (
+    (b'resp-trailer-a', b'a'),
+    (b'resp-trailer-b', b'b')
+)
+
+
+@pytest.fixture
+def open_h2_server_conn():
+    # this is a bit fake here (port 80, with alpn, but no tls - c'mon),
+    # but we don't want to pollute our tests with TLS handshakes.
+    s = Server(("example.com", 80))
+    s.state = ConnectionState.OPEN
+    s.alpn = b"h2"
+    return s
 
 
 def decode_frames(data: bytes) -> List[hyperframe.frame.Frame]:
@@ -103,6 +124,130 @@ def test_simple(tctx):
 
 
 @pytest.mark.parametrize("stream", ["stream", ""])
+def test_response_trailers(tctx: Context, open_h2_server_conn: Server, stream):
+    playbook, cff = start_h2_client(tctx)
+    tctx.server = open_h2_server_conn
+    sff = FrameFactory()
+
+    def enable_streaming(flow: HTTPFlow):
+        flow.response.stream = bool(stream)
+
+    flow = Placeholder(HTTPFlow)
+    (
+        playbook
+        >> DataReceived(tctx.client,
+                        cff.build_headers_frame(example_request_headers, flags=["END_STREAM"]).serialize())
+        << http.HttpRequestHeadersHook(flow)
+        >> reply()
+        << http.HttpRequestHook(flow)
+        >> reply()
+        << SendData(tctx.server, Placeholder(bytes))
+        # a conforming h2 server would send settings first, we disregard this for now.
+        >> DataReceived(tctx.server, sff.build_headers_frame(example_response_headers).serialize() +
+                        sff.build_data_frame(b"Hello, World!").serialize())
+        << http.HttpResponseHeadersHook(flow)
+        >> reply(side_effect=enable_streaming)
+    )
+    if stream:
+        playbook << SendData(
+            tctx.client,
+            cff.build_headers_frame(example_response_headers).serialize() +
+            cff.build_data_frame(b"Hello, World!").serialize()
+        )
+    assert (
+        playbook
+        >> DataReceived(tctx.server, sff.build_headers_frame(example_response_trailers, flags=["END_STREAM"]).serialize())
+        << http.HttpResponseHook(flow)
+    )
+    assert flow().response.trailers
+    del flow().response.trailers["resp-trailer-a"]
+    if stream:
+        assert (
+            playbook
+            >> reply()
+            << SendData(tctx.client,
+                        cff.build_headers_frame(example_response_trailers[1:], flags=["END_STREAM"]).serialize())
+        )
+    else:
+        assert (
+            playbook
+            >> reply()
+            << SendData(tctx.client,
+                        cff.build_headers_frame(example_response_headers).serialize() +
+                        cff.build_data_frame(b"Hello, World!").serialize() +
+                        cff.build_headers_frame(example_response_trailers[1:], flags=["END_STREAM"]).serialize()))
+
+
+@pytest.mark.parametrize("stream", ["stream", ""])
+def test_request_trailers(tctx: Context, open_h2_server_conn: Server, stream):
+    playbook, cff = start_h2_client(tctx)
+    tctx.server = open_h2_server_conn
+
+    def enable_streaming(flow: HTTPFlow):
+        flow.request.stream = bool(stream)
+
+    flow = Placeholder(HTTPFlow)
+    server_data1 = Placeholder(bytes)
+    server_data2 = Placeholder(bytes)
+    (
+        playbook
+        >> DataReceived(tctx.client,
+                        cff.build_headers_frame(example_request_headers).serialize() +
+                        cff.build_data_frame(b"Hello, World!").serialize()
+                        )
+        << http.HttpRequestHeadersHook(flow)
+        >> reply(side_effect=enable_streaming)
+    )
+    if stream:
+        playbook << SendData(tctx.server, server_data1)
+    assert (
+        playbook
+        >> DataReceived(tctx.client,
+                        cff.build_headers_frame(example_request_trailers, flags=["END_STREAM"]).serialize())
+        << http.HttpRequestHook(flow)
+        >> reply()
+        << SendData(tctx.server, server_data2)
+    )
+    frames = decode_frames(server_data1.setdefault(b"") + server_data2())
+    assert [type(x) for x in frames] == [
+        hyperframe.frame.SettingsFrame,
+        hyperframe.frame.HeadersFrame,
+        hyperframe.frame.DataFrame,
+        hyperframe.frame.HeadersFrame,
+    ]
+
+
+def test_upstream_error(tctx):
+    playbook, cff = start_h2_client(tctx)
+    flow = Placeholder(HTTPFlow)
+    server = Placeholder(Server)
+    err = Placeholder(bytes)
+    assert (
+            playbook
+            >> DataReceived(tctx.client,
+                            cff.build_headers_frame(example_request_headers, flags=["END_STREAM"]).serialize())
+            << http.HttpRequestHeadersHook(flow)
+            >> reply()
+            << http.HttpRequestHook(flow)
+            >> reply()
+            << OpenConnection(server)
+            >> reply("oops server <> error")
+            << http.HttpErrorHook(flow)
+            >> reply()
+            << SendData(tctx.client, err)
+    )
+    frames = decode_frames(err())
+    assert [type(x) for x in frames] == [
+        hyperframe.frame.HeadersFrame,
+        hyperframe.frame.DataFrame,
+    ]
+    d = frames[1]
+    assert isinstance(d, hyperframe.frame.DataFrame)
+    assert b"502 Bad Gateway" in d.data
+    assert b"server &lt;&gt; error" in d.data
+
+
+@pytest.mark.parametrize("stream", ["stream", ""])
 @pytest.mark.parametrize("when", ["request", "response"])
 @pytest.mark.parametrize("how", ["RST", "disconnect", "RST+disconnect"])
 def test_http2_client_aborts(tctx, stream, when, how):
@@ -132,8 +277,6 @@ def test_http2_client_aborts(tctx, stream, when, how):
         assert (
                 playbook
                 >> reply(side_effect=enable_request_streaming)
-                << http.HttpRequestHook(flow)
-                >> reply()
                 << OpenConnection(server)
                 >> reply(None)
                 << SendData(server, b"GET / HTTP/1.1\r\n"
@@ -251,9 +394,7 @@ def test_no_normalization(tctx):
             >> reply()
             << http.HttpResponseHook(flow)
             >> reply()
-            << SendData(tctx.client,
-                        cff.build_headers_frame(response_headers).serialize() +
-                        cff.build_data_frame(b"", flags=["END_STREAM"]).serialize())
+            << SendData(tctx.client, cff.build_headers_frame(response_headers, flags=["END_STREAM"]).serialize())
     )
     assert flow().request.headers.fields == ((b"Should-Not-Be-Capitalized! ", b" :) "),)
     assert flow().response.headers.fields == ((b"Same", b"Here"),)
@@ -464,6 +605,31 @@ def test_max_concurrency(tctx):
     assert type(req2) == hyperframe.frame.HeadersFrame
     assert req1.stream_id == 1
     assert req2.stream_id == 3
+
+
+def test_stream_concurrent_get_connection(tctx):
+    """Test that an immediate second request for the same domain does not trigger a second connection attempt."""
+    playbook, cff = start_h2_client(tctx)
+    playbook.hooks = False
+
+    server = Placeholder(Server)
+    data = Placeholder(bytes)
+
+    assert (playbook
+            >> DataReceived(tctx.client, cff.build_headers_frame(example_request_headers, flags=["END_STREAM"],
+                                                                 stream_id=1).serialize())
+            << (o := OpenConnection(server))
+            >> DataReceived(tctx.client, cff.build_headers_frame(example_request_headers, flags=["END_STREAM"],
+                                                                 stream_id=3).serialize())
+            >> reply(None, to=o, side_effect=make_h2)
+            << SendData(server, data)
+            )
+    frames = decode_frames(data())
+    assert [type(x) for x in frames] == [
+        hyperframe.frame.SettingsFrame,
+        hyperframe.frame.HeadersFrame,
+        hyperframe.frame.HeadersFrame,
+    ]
 
 
 def test_kill_stream(tctx):

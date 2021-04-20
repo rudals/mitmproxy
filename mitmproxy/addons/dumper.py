@@ -1,19 +1,19 @@
 import itertools
 import shutil
 import sys
-from typing import Optional, TextIO
+from typing import Optional, TextIO, Union
 
 import click
 
 from mitmproxy import contentviews
 from mitmproxy import ctx
-from mitmproxy import flow
 from mitmproxy import exceptions
 from mitmproxy import flowfilter
 from mitmproxy import http
-from mitmproxy.net import http as net_http
+from mitmproxy.tcp import TCPFlow, TCPMessage
 from mitmproxy.utils import human
 from mitmproxy.utils import strutils
+from mitmproxy.websocket import WebSocketMessage
 
 
 def indent(n: int, text: str) -> str:
@@ -42,7 +42,8 @@ class Dumper:
               0: shortened request URL, response status code, WebSocket and TCP message notifications.
               1: full request URL with response status code
               2: 1 + HTTP headers
-              3: 2 + full response content, content of WebSocket and TCP messages.
+              3: 2 + truncated response content, content of WebSocket and TCP messages
+              4: 3 + nothing is truncated
             """
         )
         loader.add_option(
@@ -78,23 +79,27 @@ class Dumper:
         if self.errfp:
             self.errfp.flush()
 
-    def _echo_headers(self, headers: net_http.Headers):
+    def _echo_headers(self, headers: http.Headers):
         for k, v in headers.fields:
-            k = strutils.bytes_to_escaped_str(k)
-            v = strutils.bytes_to_escaped_str(v)
+            ks = strutils.bytes_to_escaped_str(k)
+            vs = strutils.bytes_to_escaped_str(v)
             out = "{}: {}".format(
-                click.style(k, fg="blue"),
-                click.style(v)
+                click.style(ks, fg="blue"),
+                click.style(vs)
             )
             self.echo(out, ident=4)
 
-    def _echo_trailers(self, trailers: Optional[net_http.Headers]):
+    def _echo_trailers(self, trailers: Optional[http.Headers]):
         if not trailers:
             return
         self.echo(click.style("--- HTTP Trailers", fg="magenta"), ident=4)
         self._echo_headers(trailers)
 
-    def _echo_message(self, message, flow: flow.Flow):
+    def _echo_message(
+        self,
+        message: Union[http.Message, TCPMessage, WebSocketMessage],
+        flow: Union[http.HTTPFlow, TCPFlow]
+    ):
         _, lines, error = contentviews.get_message_content_view(
             ctx.options.dumper_default_contentview,
             message,
@@ -165,8 +170,8 @@ class Dumper:
 
         http_version = ""
         if (
-                flow.request.http_version not in ("HTTP/1.1", "HTTP/1.0")
-                or flow.request.http_version != getattr(flow.response, "http_version", "HTTP/1.1")
+            not (flow.request.is_http10 or flow.request.is_http11)
+            or flow.request.http_version != getattr(flow.response, "http_version", "HTTP/1.1")
         ):
             # Hide version for h1 <-> h1 connections.
             http_version = " " + flow.request.http_version
@@ -200,7 +205,7 @@ class Dumper:
         if not flow.response.is_http2:
             reason = flow.response.reason
         else:
-            reason = net_http.status_codes.RESPONSES.get(flow.response.status_code, "")
+            reason = http.status_codes.RESPONSES.get(flow.response.status_code, "")
         reason = click.style(
             strutils.escape_control_characters(reason),
             fg=code_color,
@@ -215,8 +220,8 @@ class Dumper:
 
         http_version = ""
         if (
-                flow.response.http_version not in ("HTTP/1.1", "HTTP/1.0")
-                or flow.request.http_version != flow.response.http_version
+            not (flow.response.is_http10 or flow.response.is_http11)
+            or flow.request.http_version != flow.response.http_version
         ):
             # Hide version for h1 <-> h1 connections.
             http_version = f"{flow.response.http_version} "
@@ -226,7 +231,8 @@ class Dumper:
             # This aligns the HTTP response code with the HTTP request method:
             # 127.0.0.1:59519: GET http://example.com/
             #               << 304 Not Modified 0b
-            pad = max(0, len(human.format_address(flow.client_conn.peername)) - (2 + len(http_version) + len(replay_str)))
+            pad = max(0,
+                      len(human.format_address(flow.client_conn.peername)) - (2 + len(http_version) + len(replay_str)))
             arrows = " " * pad + arrows
 
         self.echo(f"{replay}{arrows} {http_version}{code} {reason} {size}")
@@ -271,37 +277,36 @@ class Dumper:
         if self.match(f):
             self.echo_flow(f)
 
-    def websocket_error(self, f):
+    def websocket_error(self, f: http.HTTPFlow):
         self.echo_error(
-            "Error in WebSocket connection to {}: {}".format(
-                human.format_address(f.server_conn.address), f.error
-            ),
+            f"Error in WebSocket connection to {human.format_address(f.server_conn.address)}: {f.error}",
             fg="red"
         )
 
-    def websocket_message(self, f):
+    def websocket_message(self, f: http.HTTPFlow):
+        assert f.websocket is not None  # satisfy type checker
         if self.match(f):
-            message = f.messages[-1]
-            self.echo(f.message_info(message))
+            message = f.websocket.messages[-1]
+
+            direction = "->" if message.from_client else "<-"
+            self.echo(
+                f"{human.format_address(f.client_conn.peername)} "
+                f"{direction} WebSocket {message.type.name.lower()} message "
+                f"{direction} {human.format_address(f.server_conn.address)}{f.request.path}"
+            )
             if ctx.options.flow_detail >= 3:
-                message = message.from_state(message.get_state())
-                message.content = message.content.encode() if isinstance(message.content, str) else message.content
                 self._echo_message(message, f)
 
-    def websocket_end(self, f):
+    def websocket_end(self, f: http.HTTPFlow):
+        assert f.websocket is not None  # satisfy type checker
         if self.match(f):
-            self.echo("WebSocket connection closed by {}: {} {}, {}".format(
-                f.close_sender,
-                f.close_code,
-                f.close_message,
-                f.close_reason))
+            c = 'client' if f.websocket.closed_by_client else 'server'
+            self.echo(f"WebSocket connection closed by {c}: {f.websocket.close_code} {f.websocket.close_reason}")
 
     def tcp_error(self, f):
         if self.match(f):
             self.echo_error(
-                "Error in TCP connection to {}: {}".format(
-                    human.format_address(f.server_conn.address), f.error
-                ),
+                f"Error in TCP connection to {human.format_address(f.server_conn.address)}: {f.error}",
                 fg="red"
             )
 

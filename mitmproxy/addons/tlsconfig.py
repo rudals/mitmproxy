@@ -1,9 +1,10 @@
+import ipaddress
 import os
 from pathlib import Path
 from typing import List, Optional, TypedDict, Any
 
 from OpenSSL import SSL
-from mitmproxy import certs, ctx, exceptions
+from mitmproxy import certs, ctx, exceptions, connection
 from mitmproxy.net import tls as net_tls
 from mitmproxy.options import CONF_BASENAME
 from mitmproxy.proxy import context
@@ -33,6 +34,10 @@ def alpn_select_callback(conn: SSL.Connection, options: List[bytes]) -> Any:
     http2 = app_data["http2"]
     if server_alpn and server_alpn in options:
         return server_alpn
+    if server_alpn == b"":
+        # We do have a server connection, but the remote server refused to negotiate a protocol:
+        # We need to mirror this on the client connection.
+        return SSL.NO_OVERLAPPING_PROTOCOLS
     http_alpns = tls.HTTP_ALPNS if http2 else tls.HTTP1_ALPNS
     for alpn in options:  # client sends in order of preference, so we are nice and respect that.
         if alpn in http_alpns:
@@ -113,8 +118,8 @@ class TlsConfig:
             self.create_proxy_server_ssl_conn(tls_start)
 
     def create_client_proxy_ssl_conn(self, tls_start: tls.TlsStartData) -> None:
-        client: context.Client = tls_start.context.client
-        server: context.Server = tls_start.context.server
+        client: connection.Client = tls_start.context.client
+        server: connection.Server = tls_start.context.server
 
         entry = self.get_cert(tls_start.context)
 
@@ -122,6 +127,12 @@ class TlsConfig:
             client.cipher_list = ctx.options.ciphers_client.split(":")
         # don't assign to client.cipher_list, doesn't need to be stored.
         cipher_list = client.cipher_list or DEFAULT_CIPHERS
+
+        if ctx.options.add_upstream_certs_to_client_chain:  # pragma: no cover
+            # exempted from coverage until https://bugs.python.org/issue18233 is fixed.
+            extra_chain_certs = server.certificate_list
+        else:
+            extra_chain_certs = []
 
         ssl_ctx = net_tls.create_client_proxy_context(
             min_version=net_tls.Version[ctx.options.tls_version_client_min],
@@ -132,7 +143,7 @@ class TlsConfig:
             chain_file=entry.chain_file,
             request_client_cert=False,
             alpn_select_callback=alpn_select_callback,
-            extra_chain_certs=server.certificate_list,
+            extra_chain_certs=extra_chain_certs,
             dhparams=self.certstore.dhparams,
         )
         tls_start.ssl_conn = SSL.Connection(ssl_ctx)
@@ -143,8 +154,8 @@ class TlsConfig:
         tls_start.ssl_conn.set_accept_state()
 
     def create_proxy_server_ssl_conn(self, tls_start: tls.TlsStartData) -> None:
-        client: context.Client = tls_start.context.client
-        server: context.Server = tls_start.context.server
+        client: connection.Client = tls_start.context.client
+        server: connection.Server = tls_start.context.server
         assert server.address
 
         if ctx.options.ssl_insecure:
@@ -192,7 +203,7 @@ class TlsConfig:
             max_version=net_tls.Version[ctx.options.tls_version_client_max],
             cipher_list=cipher_list,
             verify=verify,
-            sni=server.sni,
+            hostname=server.sni,
             ca_path=ctx.options.ssl_verify_upstream_trusted_confdir,
             ca_pemfile=ctx.options.ssl_verify_upstream_trusted_ca,
             client_cert=client_cert,
@@ -201,7 +212,15 @@ class TlsConfig:
 
         tls_start.ssl_conn = SSL.Connection(ssl_ctx)
         if server.sni:
-            tls_start.ssl_conn.set_tlsext_host_name(server.sni.encode())
+            try:
+                ipaddress.ip_address(server.sni)
+            except ValueError:
+                tls_start.ssl_conn.set_tlsext_host_name(server.sni.encode())
+            else:
+                # RFC 6066: Literal IPv4 and IPv6 addresses are not permitted in "HostName".
+                # It's not really ideal that we only enforce that here, but otherwise we need to add checks everywhere
+                # where we assign .sni, which is much less robust.
+                pass
         tls_start.ssl_conn.set_connect_state()
 
     def running(self):

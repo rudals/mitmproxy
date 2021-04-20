@@ -8,7 +8,7 @@ from ._base import HttpEvent
 
 @dataclass
 class RequestHeaders(HttpEvent):
-    request: http.HTTPRequest
+    request: http.Request
     end_stream: bool
     """
     If True, we already know at this point that there is no message body. This is useful for HTTP/2, where it allows
@@ -21,7 +21,7 @@ class RequestHeaders(HttpEvent):
 
 @dataclass
 class ResponseHeaders(HttpEvent):
-    response: http.HTTPResponse
+    response: http.Response
     end_stream: bool = False
 
 
@@ -43,6 +43,24 @@ class ResponseData(HttpEvent):
     def __init__(self, stream_id: int, data: bytes):
         self.stream_id = stream_id
         self.data = data
+
+
+@dataclass
+class RequestTrailers(HttpEvent):
+    trailers: http.Headers
+
+    def __init__(self, stream_id: int, trailers: http.Headers):
+        self.stream_id = stream_id
+        self.trailers = trailers
+
+
+@dataclass
+class ResponseTrailers(HttpEvent):
+    trailers: http.Headers
+
+    def __init__(self, stream_id: int, trailers: http.Headers):
+        self.stream_id = stream_id
+        self.trailers = trailers
 
 
 @dataclass
@@ -86,6 +104,8 @@ __all__ = [
     "RequestEndOfMessage",
     "ResponseHeaders",
     "ResponseData",
+    "RequestTrailers",
+    "ResponseTrailers",
     "ResponseEndOfMessage",
     "RequestProtocolError",
     "ResponseProtocolError",

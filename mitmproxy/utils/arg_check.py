@@ -71,7 +71,6 @@ REPLACEMENTS = {
     "--order": "view_order",
     "--no-mouse": "console_mouse",
     "--reverse": "view_order_reversed",
-    "--no-http2-priority": "http2_priority",
     "--no-websocket": "websocket",
     "--no-upstream-cert": "upstream_cert",
     "--upstream-trusted-confdir": "ssl_verify_upstream_trusted_confdir",
@@ -98,7 +97,7 @@ REPLACEMENTS = {
     "--cert": "--certs",
     "--insecure": "--ssl-insecure",
     "-c": "-C",
-    "--replace": "--replacements",
+    "--replace": ["--modify-body", "--modify-headers"],
     "--replacements": ["--modify-body", "--modify-headers"],
     "-i": "--intercept",
     "-f": "--view-filter",
@@ -157,7 +156,7 @@ def check():
 
     # Check for underscores in the options. Options always follow '--'.
     for argument in args:
-        underscoreParam = re.search('[-]{2}((.*?_)(.*?(\s|$)))+', argument)
+        underscoreParam = re.search(r'[-]{2}((.*?_)(.*?(\s|$)))+', argument)
         if underscoreParam is not None:
             print("{} uses underscores, please use hyphens {}".format(
                 argument,

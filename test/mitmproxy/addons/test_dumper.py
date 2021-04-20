@@ -6,7 +6,7 @@ import pytest
 
 from mitmproxy import exceptions
 from mitmproxy.addons import dumper
-from mitmproxy.net.http import Headers
+from mitmproxy.http import Headers
 from mitmproxy.test import taddons
 from mitmproxy.test import tflow
 from mitmproxy.test import tutils
@@ -233,7 +233,7 @@ def test_websocket():
         d.websocket_end(f)
         assert "WebSocket connection closed by" in sio.getvalue()
 
-        f = tflow.twebsocketflow(client_conn=True, err=True)
+        f = tflow.twebsocketflow(err=True)
         d.websocket_error(f)
         assert "Error in WebSocket" in sio_err.getvalue()
 

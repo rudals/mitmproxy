@@ -5,7 +5,7 @@ import pytest
 
 from mitmproxy.addons.clientplayback import ClientPlayback, ReplayHandler
 from mitmproxy.exceptions import CommandError, OptionsError
-from mitmproxy.proxy.context import Address
+from mitmproxy.connection import Address
 from mitmproxy.test import taddons, tflow
 
 
@@ -110,7 +110,7 @@ async def test_start_stop(tdata):
         assert cp.count() == 1
 
         cp.start_replay([tflow.twebsocketflow()])
-        await tctx.master.await_log("Can only replay HTTP flows.", level="warn")
+        await tctx.master.await_log("Can't replay WebSocket flows.", level="warn")
         assert cp.count() == 1
 
         cp.stop_replay()
@@ -120,7 +120,7 @@ async def test_start_stop(tdata):
 def test_load(tdata):
     cp = ClientPlayback()
     with taddons.context(cp):
-        cp.load_file(tdata.path("mitmproxy/data/dumpfile-018.bin"))
+        cp.load_file(tdata.path("mitmproxy/data/dumpfile-018.mitm"))
         assert cp.count() == 1
 
         with pytest.raises(CommandError):
@@ -132,7 +132,7 @@ def test_configure(tdata):
     cp = ClientPlayback()
     with taddons.context(cp) as tctx:
         assert cp.count() == 0
-        tctx.configure(cp, client_replay=[tdata.path("mitmproxy/data/dumpfile-018.bin")])
+        tctx.configure(cp, client_replay=[tdata.path("mitmproxy/data/dumpfile-018.mitm")])
         assert cp.count() == 1
         tctx.configure(cp, client_replay=[])
         with pytest.raises(OptionsError):

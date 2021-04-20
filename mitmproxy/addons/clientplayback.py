@@ -11,11 +11,13 @@ from mitmproxy import flow
 from mitmproxy import http
 from mitmproxy import io
 from mitmproxy.addons.proxyserver import AsyncReply
+from mitmproxy.hooks import UpdateHook
 from mitmproxy.net import server_spec
 from mitmproxy.options import Options
+from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import commands, events, layers, server
-from mitmproxy.proxy.context import ConnectionState, Context, Server
+from mitmproxy.connection import ConnectionState, Server
 from mitmproxy.proxy.layer import CommandGenerator
 from mitmproxy.utils import asyncio_utils
 
@@ -38,21 +40,25 @@ class MockServer(layers.http.HttpConnection):
             yield layers.http.ReceiveHttp(layers.http.RequestHeaders(
                 1,
                 self.flow.request,
-                end_stream=not content,
+                end_stream=not (content or self.flow.request.trailers),
                 replay_flow=self.flow,
             ))
             if content:
                 yield layers.http.ReceiveHttp(layers.http.RequestData(1, content))
+            if self.flow.request.trailers:  # pragma: no cover
+                # TODO: Cover this once we support HTTP/1 trailers.
+                yield layers.http.ReceiveHttp(layers.http.RequestTrailers(1, self.flow.request.trailers))
             yield layers.http.ReceiveHttp(layers.http.RequestEndOfMessage(1))
         elif isinstance(event, (
                 layers.http.ResponseHeaders,
                 layers.http.ResponseData,
+                layers.http.ResponseTrailers,
                 layers.http.ResponseEndOfMessage,
                 layers.http.ResponseProtocolError,
         )):
             pass
         else:  # pragma: no cover
-            ctx.log(f"Unexpected event during replay: {events}")
+            ctx.log(f"Unexpected event during replay: {event}")
 
 
 class ReplayHandler(server.ConnectionHandler):
@@ -84,10 +90,10 @@ class ReplayHandler(server.ConnectionHandler):
     def log(self, message: str, level: str = "info") -> None:
         ctx.log(f"[replay] {message}", level)
 
-    async def handle_hook(self, hook: commands.Hook) -> None:
+    async def handle_hook(self, hook: commands.StartHook) -> None:
         data, = hook.args()
         data.reply = AsyncReply(data)
-        await ctx.master.addons.handle_lifecycle(hook.name, data)
+        await ctx.master.addons.handle_lifecycle(hook)
         await data.reply.done.wait()
         if isinstance(hook, (layers.http.HttpResponseHook, layers.http.HttpErrorHook)):
             if self.transports:
@@ -143,6 +149,8 @@ class ClientPlayback:
                 return "Can't replay flow with missing request."
             if f.request.raw_content is None:
                 return "Can't replay flow with missing content."
+            if f.websocket is not None:
+                return "Can't replay WebSocket flows."
         else:
             return "Can only replay HTTP flows."
         return None
@@ -184,7 +192,7 @@ class ClientPlayback:
                 f.revert()
                 updated.append(f)
 
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(UpdateHook(updated))
         ctx.log.alert("Client replay queue cleared.")
 
     @command.command("replay.client")
@@ -208,7 +216,7 @@ class ClientPlayback:
             http_flow.error = None
             self.queue.put_nowait(http_flow)
             updated.append(http_flow)
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(UpdateHook(updated))
 
     @command.command("replay.client.file")
     def load_file(self, path: mitmproxy.types.Path) -> None:

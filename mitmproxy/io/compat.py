@@ -174,19 +174,22 @@ def convert_6_7(data):
 
 def convert_7_8(data):
     data["version"] = 8
-    data["request"]["trailers"] = None
-    if data["response"] is not None:
+    if "request" in data and data["request"] is not None:
+        data["request"]["trailers"] = None
+    if "response" in data and data["response"] is not None:
         data["response"]["trailers"] = None
     return data
 
 
 def convert_8_9(data):
     data["version"] = 9
-    data["request"].pop("first_line_format")
-    data["request"]["authority"] = b""
-    is_request_replay = data["request"].pop("is_replay", False)
+    is_request_replay = False
+    if "request" in data:
+        data["request"].pop("first_line_format")
+        data["request"]["authority"] = b""
+        is_request_replay = data["request"].pop("is_replay", False)
     is_response_replay = False
-    if data["response"] is not None:
+    if "response" in data and data["response"] is not None:
         is_response_replay = data["response"].pop("is_replay", False)
     if is_request_replay:  # pragma: no cover
         data["is_replay"] = "request"
@@ -243,6 +246,56 @@ def convert_10_11(data):
     conv_conn(data["server_conn"])
     if data["server_conn"]["via"]:
         conv_conn(data["server_conn"]["via"])
+
+    return data
+
+
+_websocket_handshakes = {}
+
+
+def convert_11_12(data):
+    data["version"] = 12
+
+    if "websocket" in data["metadata"]:
+        _websocket_handshakes[data["id"]] = data
+
+    if "websocket_handshake" in data["metadata"]:
+        ws_flow = data
+        try:
+            data = _websocket_handshakes.pop(data["metadata"]["websocket_handshake"])
+        except KeyError:
+            # The handshake flow is missing, which should never really happen. We make up a dummy.
+            data = {
+                'client_conn': data["client_conn"],
+                'error': data["error"],
+                'id': data["id"],
+                'intercepted': data["intercepted"],
+                'is_replay': data["is_replay"],
+                'marked': data["marked"],
+                'metadata': {},
+                'mode': 'transparent',
+                'request': {'authority': b'', 'content': None, 'headers': [], 'host': b'unknown',
+                            'http_version': b'HTTP/1.1', 'method': b'GET', 'path': b'/', 'port': 80, 'scheme': b'http',
+                            'timestamp_end': 0, 'timestamp_start': 0, 'trailers': None, },
+                'response': None,
+                'server_conn': data["server_conn"],
+                'type': 'http',
+                'version': 12
+            }
+        data["metadata"]["duplicated"] = (
+            "This WebSocket flow has been migrated from an old file format version "
+            "and may appear duplicated."
+        )
+        data["websocket"] = {
+            "messages": ws_flow["messages"],
+            "closed_by_client": ws_flow["close_sender"] == "client",
+            "close_code": ws_flow["close_code"],
+            "close_reason": ws_flow["close_reason"],
+            "timestamp_end": data.get("server_conn", {}).get("timestamp_end", None),
+        }
+
+    else:
+        data["websocket"] = None
 
     return data
 
@@ -305,6 +358,7 @@ converters = {
     8: convert_8_9,
     9: convert_9_10,
     10: convert_10_11,
+    11: convert_11_12,
 }
 
 
@@ -322,8 +376,8 @@ def migrate_flow(flow_data: Dict[Union[bytes, str], Any]) -> Dict[Union[bytes, s
             flow_data = converters[flow_version](flow_data)
         else:
             should_upgrade = (
-                    isinstance(flow_version, int)
-                    and flow_version > version.FLOW_FORMAT_VERSION
+                isinstance(flow_version, int)
+                and flow_version > version.FLOW_FORMAT_VERSION
             )
             raise ValueError(
                 "{} cannot read files with flow format version {}{}.".format(

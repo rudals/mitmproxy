@@ -3,7 +3,7 @@ import typing
 import os
 
 from mitmproxy.utils import human
-from mitmproxy import ctx
+from mitmproxy import ctx, hooks
 from mitmproxy import exceptions
 from mitmproxy import command
 from mitmproxy import flow
@@ -42,6 +42,10 @@ class Core:
                 "add_upstream_certs_to_client_chain requires the upstream_cert option to be enabled."
             )
         if "body_size_limit" in updated:
+            if opts.body_size_limit:  # pragma: no cover
+                ctx.log.warn(
+                    "body_size_limit is currently nonfunctioning, "
+                    "see https://github.com/mitmproxy/mitmproxy/issues/4348")
             try:
                 human.parse_size(opts.body_size_limit)
             except ValueError:
@@ -95,7 +99,7 @@ class Core:
         intercepted = [i for i in flows if i.intercepted]
         for f in intercepted:
             f.resume()
-        ctx.master.addons.trigger("update", intercepted)
+        ctx.master.addons.trigger(hooks.UpdateHook(intercepted))
 
     # FIXME: this will become view.mark later
     @command.command("flow.mark")
@@ -108,7 +112,7 @@ class Core:
             if i.marked != boolean:
                 i.marked = boolean
                 updated.append(i)
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
 
     # FIXME: this will become view.mark.toggle later
     @command.command("flow.mark.toggle")
@@ -118,7 +122,7 @@ class Core:
         """
         for i in flows:
             i.marked = not i.marked
-        ctx.master.addons.trigger("update", flows)
+        ctx.master.addons.trigger(hooks.UpdateHook(flows))
 
     @command.command("flow.kill")
     def kill(self, flows: typing.Sequence[flow.Flow]) -> None:
@@ -131,7 +135,7 @@ class Core:
                 f.kill()
                 updated.append(f)
         ctx.log.alert("Killed %s flows." % len(updated))
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
 
     # FIXME: this will become view.revert later
     @command.command("flow.revert")
@@ -145,7 +149,7 @@ class Core:
                 f.revert()
                 updated.append(f)
         ctx.log.alert("Reverted %s flows." % len(updated))
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
 
     @command.command("flow.set.options")
     def flow_set_options(self) -> typing.Sequence[str]:
@@ -214,7 +218,7 @@ class Core:
             if rupdate or supdate:
                 updated.append(f)
 
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
         ctx.log.alert("Set {} on  {} flows.".format(attr, len(updated)))
 
     @command.command("flow.decode")
@@ -229,7 +233,7 @@ class Core:
                 f.backup()
                 p.decode()
                 updated.append(f)
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
         ctx.log.alert("Decoded %s flows." % len(updated))
 
     @command.command("flow.encode.toggle")
@@ -248,7 +252,7 @@ class Core:
                 else:
                     p.decode()
                 updated.append(f)
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
         ctx.log.alert("Toggled encoding on %s flows." % len(updated))
 
     @command.command("flow.encode")
@@ -271,7 +275,7 @@ class Core:
                     f.backup()
                     p.encode(encoding)
                     updated.append(f)
-        ctx.master.addons.trigger("update", updated)
+        ctx.master.addons.trigger(hooks.UpdateHook(updated))
         ctx.log.alert("Encoded %s flows." % len(updated))
 
     @command.command("flow.encode.options")

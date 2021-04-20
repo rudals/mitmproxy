@@ -5,10 +5,12 @@ The counterpart to events are commands.
 """
 import socket
 import typing
+import warnings
 from dataclasses import dataclass, is_dataclass
 
+from mitmproxy import flow
 from mitmproxy.proxy import commands
-from mitmproxy.proxy.context import Connection
+from mitmproxy.connection import Connection
 
 
 class Event:
@@ -55,7 +57,7 @@ class ConnectionClosed(ConnectionEvent):
     pass
 
 
-class CommandReply(Event):
+class CommandCompleted(Event):
     """
     Emitted when a command has been finished, e.g.
     when the master has replied or when we have established a server connection.
@@ -64,8 +66,8 @@ class CommandReply(Event):
     reply: typing.Any
 
     def __new__(cls, *args, **kwargs):
-        if cls is CommandReply:
-            raise TypeError("CommandReply may not be instantiated directly.")
+        if cls is CommandCompleted:
+            raise TypeError("CommandCompleted may not be instantiated directly.")
         assert is_dataclass(cls)
         return super().__new__(cls)
 
@@ -75,33 +77,45 @@ class CommandReply(Event):
                 issubclass(command_cls, commands.Command) and command_cls is not commands.Command
         )
         if not valid_command_subclass:
-            raise RuntimeError(f"{command_cls} needs a properly annotated command attribute.")
+            warnings.warn(f"{command_cls} needs a properly annotated command attribute.", RuntimeWarning)
         if command_cls in command_reply_subclasses:
             other = command_reply_subclasses[command_cls]
-            raise RuntimeError(f"Two conflicting subclasses for {command_cls}: {cls} and {other}")
+            warnings.warn(f"Two conflicting subclasses for {command_cls}: {cls} and {other}", RuntimeWarning)
         command_reply_subclasses[command_cls] = cls
 
     def __repr__(self):
-        return f"Reply({repr(self.command)})"
+        return f"Reply({repr(self.command)},{repr(self.reply)})"
 
 
-command_reply_subclasses: typing.Dict[commands.Command, typing.Type[CommandReply]] = {}
+command_reply_subclasses: typing.Dict[commands.Command, typing.Type[CommandCompleted]] = {}
 
 
 @dataclass(repr=False)
-class OpenConnectionReply(CommandReply):
+class OpenConnectionCompleted(CommandCompleted):
     command: commands.OpenConnection
     reply: typing.Optional[str]
     """error message"""
 
 
 @dataclass(repr=False)
-class HookReply(CommandReply):
-    command: commands.Hook
+class HookCompleted(CommandCompleted):
+    command: commands.StartHook
     reply: None = None
 
 
 @dataclass(repr=False)
-class GetSocketReply(CommandReply):
+class GetSocketCompleted(CommandCompleted):
     command: commands.GetSocket
     reply: socket.socket
+
+
+T = typing.TypeVar('T')
+
+
+@dataclass
+class MessageInjected(Event, typing.Generic[T]):
+    """
+    The user has injected a custom WebSocket/TCP/... message.
+    """
+    flow: flow.Flow
+    message: T

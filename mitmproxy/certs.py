@@ -39,6 +39,7 @@ rD693XKIHUCWOjMh1if6omGXKHH40QuME2gNa50+YPn1iYDl88uDbbMCAQI=
 
 
 class Cert(serializable.Serializable):
+    """Representation of a (TLS) certificate."""
     _cert: x509.Certificate
 
     def __init__(self, cert: x509.Certificate):
@@ -100,7 +101,7 @@ class Cert(serializable.Serializable):
         return self._cert.serial_number
 
     @property
-    def keyinfo(self):
+    def keyinfo(self) -> Tuple[str, int]:
         public_key = self._cert.public_key()
         if isinstance(public_key, rsa.RSAPublicKey):
             return "RSA", public_key.key_size
@@ -136,9 +137,9 @@ class Cert(serializable.Serializable):
             return []
         else:
             return (
-                    ext.get_values_for_type(x509.DNSName)
-                    +
-                    [str(x) for x in ext.get_values_for_type(x509.IPAddress)]
+                ext.get_values_for_type(x509.DNSName)
+                +
+                [str(x) for x in ext.get_values_for_type(x509.IPAddress)]
             )
 
 
@@ -151,9 +152,9 @@ def _name_to_keyval(name: x509.Name) -> List[Tuple[str, str]]:
 
 
 def create_ca(
-        organization: str,
-        cn: str,
-        key_size: int,
+    organization: str,
+    cn: str,
+    key_size: int,
 ) -> Tuple[rsa.RSAPrivateKeyWithSerialization, x509.Certificate]:
     now = datetime.datetime.now()
 
@@ -192,11 +193,11 @@ def create_ca(
 
 
 def dummy_cert(
-        privkey: rsa.RSAPrivateKey,
-        cacert: x509.Certificate,
-        commonname: Optional[str],
-        sans: List[str],
-        organization: Optional[str] = None,
+    privkey: rsa.RSAPrivateKey,
+    cacert: x509.Certificate,
+    commonname: Optional[str],
+    sans: List[str],
+    organization: Optional[str] = None,
 ) -> Cert:
     """
         Generates a dummy certificate.
@@ -220,7 +221,7 @@ def dummy_cert(
 
     subject = []
     is_valid_commonname = (
-            commonname is not None and len(commonname) < 64
+        commonname is not None and len(commonname) < 64
     )
     if is_valid_commonname:
         assert commonname is not None
@@ -268,11 +269,11 @@ class CertStore:
     expire_queue: List[CertStoreEntry]
 
     def __init__(
-            self,
-            default_privatekey: rsa.RSAPrivateKey,
-            default_ca: Cert,
-            default_chain_file: Optional[Path],
-            dhparams: DHParams
+        self,
+        default_privatekey: rsa.RSAPrivateKey,
+        default_ca: Cert,
+        default_chain_file: Optional[Path],
+        dhparams: DHParams
     ):
         self.default_privatekey = default_privatekey
         self.default_ca = default_ca
@@ -311,11 +312,11 @@ class CertStore:
 
     @classmethod
     def from_store(
-            cls,
-            path: Union[Path, str],
-            basename: str,
-            key_size: int,
-            passphrase: Optional[bytes] = None
+        cls,
+        path: Union[Path, str],
+        basename: str,
+        key_size: int,
+        passphrase: Optional[bytes] = None
     ) -> "CertStore":
         path = Path(path)
         ca_file = path / f"{basename}-ca.pem"
@@ -393,9 +394,9 @@ class CertStore:
 
         # Dump the certificate in PKCS12 format for Windows devices
         (path / f"{basename}-ca-cert.p12").write_bytes(
-            pkcs12.serialize_key_and_certificates(  # type: ignore
+            pkcs12.serialize_key_and_certificates(
                 name=basename.encode(),
-                key=None,
+                key=None,  # type: ignore
                 cert=ca,
                 cas=None,
                 encryption_algorithm=serialization.NoEncryption(),
@@ -442,10 +443,10 @@ class CertStore:
         return ret
 
     def get_cert(
-            self,
-            commonname: Optional[str],
-            sans: List[str],
-            organization: Optional[str] = None
+        self,
+        commonname: Optional[str],
+        sans: List[str],
+        organization: Optional[str] = None
     ) -> CertStoreEntry:
         """
             commonname: Common name for the generated certificate. Must be a

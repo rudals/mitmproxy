@@ -2,6 +2,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from mitmproxy import connection
 from mitmproxy.addons.next_layer import NextLayer
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import context, layers
@@ -10,7 +11,7 @@ from mitmproxy.test import taddons
 
 @pytest.fixture
 def tctx():
-    context.Context(context.Client(("client", 1234), ("127.0.0.1", 8080), 1605699329), tctx.options)
+    context.Context(connection.Client(("client", 1234), ("127.0.0.1", 8080), 1605699329), tctx.options)
 
 
 client_hello_no_extensions = bytes.fromhex(
@@ -77,8 +78,7 @@ class TestNextLayer:
             assert isinstance(nl.make_top_layer(ctx), layers.modes.ReverseProxy)
 
             tctx.configure(nl, mode="socks5")
-            with pytest.raises(NotImplementedError):
-                nl.make_top_layer(ctx)
+            assert isinstance(nl.make_top_layer(ctx), layers.modes.Socks5Proxy)
 
     def test_next_layer(self):
         nl = NextLayer()
@@ -97,6 +97,10 @@ class TestNextLayer:
 
             tctx.configure(nl, ignore_hosts=[])
             assert isinstance(nl._next_layer(ctx, client_hello_no_extensions, b""), layers.ServerTLSLayer)
+            assert isinstance(ctx.layers[-1], layers.ClientTLSLayer)
+
+            ctx.layers = []
+            assert isinstance(nl._next_layer(ctx, b"", b""), layers.modes.HttpProxy)
             assert isinstance(nl._next_layer(ctx, client_hello_no_extensions, b""), layers.ClientTLSLayer)
 
             ctx.layers = []

@@ -7,6 +7,7 @@ from mitmproxy import flowfilter
 from mitmproxy import io
 from mitmproxy import ctx
 from mitmproxy import flow
+from mitmproxy import http
 import mitmproxy.types
 
 
@@ -85,23 +86,30 @@ class Save:
             self.stream.add(flow)
             self.active_flows.discard(flow)
 
-    def websocket_start(self, flow):
-        if self.stream:
-            self.active_flows.add(flow)
+    def tcp_error(self, flow):
+        self.tcp_end(flow)
 
-    def websocket_end(self, flow):
+    def websocket_end(self, flow: http.HTTPFlow):
         if self.stream:
             self.stream.add(flow)
             self.active_flows.discard(flow)
 
-    def response(self, flow):
+    def websocket_error(self, flow: http.HTTPFlow):
+        self.websocket_end(flow)
+
+    def request(self, flow: http.HTTPFlow):
         if self.stream:
+            self.active_flows.add(flow)
+
+    def response(self, flow: http.HTTPFlow):
+        # websocket flows will receive either websocket_end or websocket_error,
+        # we don't want to persist them here already
+        if self.stream and flow.websocket is None:
             self.stream.add(flow)
             self.active_flows.discard(flow)
 
-    def request(self, flow):
-        if self.stream:
-            self.active_flows.add(flow)
+    def error(self, flow: http.HTTPFlow):
+        self.response(flow)
 
     def done(self):
         if self.stream:

@@ -8,6 +8,7 @@ from mitmproxy import flowfilter
 from mitmproxy import options
 from mitmproxy.exceptions import FlowReadException
 from mitmproxy.io import tnetstring
+from mitmproxy.proxy import server_hooks, layers
 from mitmproxy.test import taddons, tflow
 
 
@@ -122,20 +123,6 @@ class TestFlowMaster:
             assert s.flows[0].request.host == "use-this-domain"
 
     @pytest.mark.asyncio
-    async def test_load_websocket_flow(self):
-        opts = options.Options(
-            mode="reverse:https://use-this-domain"
-        )
-        s = State()
-        with taddons.context(s, options=opts) as ctx:
-            f = tflow.twebsocketflow()
-            await ctx.master.load_flow(f.handshake_flow)
-            await ctx.master.load_flow(f)
-            assert s.flows[0].request.host == "use-this-domain"
-            assert s.flows[1].handshake_flow == f.handshake_flow
-            assert len(s.flows[1].messages) == len(f.messages)
-
-    @pytest.mark.asyncio
     async def test_all(self):
         opts = options.Options(
             mode="reverse:https://use-this-domain"
@@ -143,19 +130,19 @@ class TestFlowMaster:
         s = State()
         with taddons.context(s, options=opts) as ctx:
             f = tflow.tflow(req=None)
-            await ctx.master.addons.handle_lifecycle("clientconnect", f.client_conn)
+            await ctx.master.addons.handle_lifecycle(server_hooks.ClientConnectedHook(f.client_conn))
             f.request = mitmproxy.test.tutils.treq()
-            await ctx.master.addons.handle_lifecycle("request", f)
+            await ctx.master.addons.handle_lifecycle(layers.http.HttpRequestHook(f))
             assert len(s.flows) == 1
 
             f.response = mitmproxy.test.tutils.tresp()
-            await ctx.master.addons.handle_lifecycle("response", f)
+            await ctx.master.addons.handle_lifecycle(layers.http.HttpResponseHook(f))
             assert len(s.flows) == 1
 
-            await ctx.master.addons.handle_lifecycle("clientdisconnect", f.client_conn)
+            await ctx.master.addons.handle_lifecycle(server_hooks.ClientDisconnectedHook(f.client_conn))
 
             f.error = flow.Error("msg")
-            await ctx.master.addons.handle_lifecycle("error", f)
+            await ctx.master.addons.handle_lifecycle(layers.http.HttpErrorHook(f))
 
 
 class TestError:

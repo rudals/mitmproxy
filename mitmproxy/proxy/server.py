@@ -17,9 +17,10 @@ from dataclasses import dataclass
 
 from OpenSSL import SSL
 from mitmproxy import http, options as moptions
+from mitmproxy.proxy.context import Context
 from mitmproxy.proxy.layers.http import HTTPMode
 from mitmproxy.proxy import commands, events, layer, layers, server_hooks
-from mitmproxy.proxy.context import Address, Client, Connection, ConnectionState, Context
+from mitmproxy.connection import Address, Client, Connection, ConnectionState
 from mitmproxy.proxy.layers import tls
 from mitmproxy.utils import asyncio_utils
 from mitmproxy.utils import human
@@ -120,7 +121,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
 
         self.log("client disconnect")
         self.client.timestamp_end = time.time()
-        await self.handle_hook(server_hooks.ClientClosedHook(self.client))
+        await self.handle_hook(server_hooks.ClientDisconnectedHook(self.client))
 
         if self.transports:
             self.log("closing transports...", "debug")
@@ -133,7 +134,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
     async def open_connection(self, command: commands.OpenConnection) -> None:
         if not command.connection.address:
             self.log(f"Cannot open connection, no hostname given.")
-            self.server_event(events.OpenConnectionReply(command, f"Cannot open connection, no hostname given."))
+            self.server_event(events.OpenConnectionCompleted(command, f"Cannot open connection, no hostname given."))
             return
 
         hook_data = server_hooks.ServerConnectionHookData(
@@ -141,9 +142,9 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
             server=command.connection
         )
         await self.handle_hook(server_hooks.ServerConnectHook(hook_data))
-        if command.connection.error:
-            self.log(f"server connection to {human.format_address(command.connection.address)} killed before connect.")
-            self.server_event(events.OpenConnectionReply(command, "Connection killed."))
+        if err := command.connection.error:
+            self.log(f"server connection to {human.format_address(command.connection.address)} killed before connect: {err}")
+            self.server_event(events.OpenConnectionCompleted(command, f"Connection killed: {err}"))
             return
 
         async with self.max_conns[command.connection.address]:
@@ -156,7 +157,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
                     err = "connection cancelled"
                 self.log(f"error establishing server connection: {err}")
                 command.connection.error = err
-                self.server_event(events.OpenConnectionReply(command, err))
+                self.server_event(events.OpenConnectionCompleted(command, err))
                 if isinstance(e, asyncio.CancelledError):
                     # From https://docs.python.org/3/library/asyncio-exceptions.html#asyncio.CancelledError:
                     # > In almost all situations the exception must be re-raised.
@@ -184,7 +185,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
                 if not connected_hook:
                     return  # this should not be needed, see asyncio_utils.create_task
 
-                self.server_event(events.OpenConnectionReply(command, None))
+                self.server_event(events.OpenConnectionCompleted(command, None))
 
                 # during connection opening, this function is the designated handler that can be cancelled.
                 # once we have a connection, we do want the teardown here to happen in any case, so we
@@ -202,7 +203,7 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
                 self.log(f"server disconnect {addr}")
                 command.connection.timestamp_end = time.time()
                 await connected_hook  # wait here for this so that closed always comes after connected.
-                await self.handle_hook(server_hooks.ServerClosedHook(hook_data))
+                await self.handle_hook(server_hooks.ServerDisconnectedHook(hook_data))
 
     async def handle_connection(self, connection: Connection) -> None:
         """
@@ -256,13 +257,13 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
         assert handler
         asyncio_utils.cancel_task(handler, "timeout")
 
-    async def hook_task(self, hook: commands.Hook) -> None:
+    async def hook_task(self, hook: commands.StartHook) -> None:
         await self.handle_hook(hook)
         if hook.blocking:
-            self.server_event(events.HookReply(hook))
+            self.server_event(events.HookCompleted(hook))
 
     @abc.abstractmethod
-    async def handle_hook(self, hook: commands.Hook) -> None:
+    async def handle_hook(self, hook: commands.StartHook) -> None:
         pass
 
     def log(self, message: str, level: str = "info") -> None:
@@ -294,8 +295,8 @@ class ConnectionHandler(metaclass=abc.ABCMeta):
                     writer = self.transports[command.connection].writer
                     assert writer
                     socket = writer.get_extra_info("socket")
-                    self.server_event(events.GetSocketReply(command, socket))
-                elif isinstance(command, commands.Hook):
+                    self.server_event(events.GetSocketCompleted(command, socket))
+                elif isinstance(command, commands.StartHook):
                     asyncio_utils.create_task(
                         self.hook_task(command),
                         name=f"handle_hook({command.name})",
@@ -354,7 +355,7 @@ class SimpleConnectionHandler(StreamConnectionHandler):  # pragma: no cover
 
     async def handle_hook(
             self,
-            hook: commands.Hook
+            hook: commands.StartHook
     ) -> None:
         if hook.name in self.hook_handlers:
             self.hook_handlers[hook.name](*hook.args())
@@ -401,7 +402,7 @@ if __name__ == "__main__":  # pragma: no cover
 
         def request(flow: http.HTTPFlow):
             if "cached" in flow.request.path:
-                flow.response = http.HTTPResponse.make(418, f"(cached) {flow.request.text}")
+                flow.response = http.Response.make(418, f"(cached) {flow.request.text}")
             if "toggle-tls" in flow.request.path:
                 if flow.request.url.startswith("https://"):
                     flow.request.url = flow.request.url.replace("https://", "http://")

@@ -1,16 +1,16 @@
 """
-Parse scheme, host and port from a string.
+Server specs are used to describe an upstream proxy or server.
 """
+import functools
 import re
-import typing
-from typing import Tuple
+from typing import Tuple, Literal, NamedTuple
 
 from mitmproxy.net import check
 
 
-class ServerSpec(typing.NamedTuple):
-    scheme: str
-    address: typing.Tuple[str, int]
+class ServerSpec(NamedTuple):
+    scheme: Literal["http", "https"]
+    address: Tuple[str, int]
 
 
 server_spec_re = re.compile(
@@ -26,23 +26,26 @@ server_spec_re = re.compile(
 )
 
 
+@functools.lru_cache
 def parse(server_spec: str) -> ServerSpec:
     """
     Parses a server mode specification, e.g.:
 
-        - http://example.com/
-        - example.org
-        - example.com:443
+     - http://example.com/
+     - example.org
+     - example.com:443
 
-    Raises:
-        ValueError, if the server specification is invalid.
+    *Raises:*
+     - ValueError, if the server specification is invalid.
     """
     m = server_spec_re.match(server_spec)
     if not m:
         raise ValueError(f"Invalid server specification: {server_spec}")
 
-    # defaulting to https/port 443 may annoy some folks, but it's secure-by-default.
-    scheme = m.group("scheme") or "https"
+    if m.group("scheme"):
+        scheme = m.group("scheme")
+    else:
+        scheme = "https" if m.group("port") in ("443", None) else "http"
     if scheme not in ("http", "https"):
         raise ValueError(f"Invalid server scheme: {scheme}")
 
@@ -50,7 +53,7 @@ def parse(server_spec: str) -> ServerSpec:
     # IPv6 brackets
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]
-    if not check.is_valid_host(host.encode("idna")):
+    if not check.is_valid_host(host):
         raise ValueError(f"Invalid hostname: {host}")
 
     if m.group("port"):
@@ -63,18 +66,15 @@ def parse(server_spec: str) -> ServerSpec:
     if not check.is_valid_port(port):
         raise ValueError(f"Invalid port: {port}")
 
-    return ServerSpec(scheme, (host, port))
+    return ServerSpec(scheme, (host, port))  # type: ignore
 
 
 def parse_with_mode(mode: str) -> Tuple[str, ServerSpec]:
     """
-    Parse a proxy mode specification, which is usually just (reverse|upstream):server-spec
+    Parse a proxy mode specification, which is usually just `(reverse|upstream):server-spec`.
 
-    Returns:
-        A (mode, server_spec) tuple.
-
-    Raises:
-        ValueError, if the specification is invalid.
+    *Raises:*
+     - ValueError, if the specification is invalid.
     """
     mode, server_spec = mode.split(":", maxsplit=1)
     return mode, parse(server_spec)
